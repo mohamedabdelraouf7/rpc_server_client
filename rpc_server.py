@@ -1,49 +1,29 @@
 #!/usr/bin/env python3
-import os
-import json
-import redis
+import os, json, redis, uuid
 
-# -- Define the remote‐callable functions here --
-def add(a, b):
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REQUEST_CH = "rpc:req"
+RESPONSE_CH = "rpc:res:"
+
+def add(a, b):     
     return a + b
 
-def multiply(a, b):
-    return a * b
-
-FUNCTIONS = {
-    'add': add,
-    'multiply': multiply,
-}
-
 def main():
-    # Connect to Redis (set REDIS_HOST/REDIS_PORT as needed)
-    redis_host = os.environ.get('REDIS_HOST', 'localhost')
-    redis_port = int(os.environ.get('REDIS_PORT', 6379))
-    r = redis.Redis(host=redis_host, port=redis_port)
+    r = redis.Redis(host=REDIS_HOST, decode_responses=True)
+    sub = r.pubsub()
+    sub.subscribe(REQUEST_CH)
+    print(f"[SERVER] Waiting for calls on {REQUEST_CH} …")
+    for msg in sub.listen():
+        if msg["type"] != "message":
+            continue
+        req = json.loads(msg["data"])
+        call_id = req["id"]
+        method  = req["method"]
+        params  = req.get("params", [])
+        print(f"[SERVER] {method}{tuple(params)}")
+        # simple function dispatcher
+        result = globals()[method](*params)
+        r.publish(RESPONSE_CH + call_id, json.dumps({"result": result}))
 
-    print(f"[RPC Server] Listening on queue 'rpc_queue' @ {redis_host}:{redis_port}")
-    while True:
-        # BLPOP blocks until a request arrives
-        _, msg = r.blpop('rpc_queue')
-        req = json.loads(msg)
-
-        func_name   = req.get('function')
-        args        = req.get('args', [])
-        kwargs      = req.get('kwargs', {})
-        reply_queue = req.get('reply_to')
-        corr_id     = req.get('id')
-
-        # build basic response
-        resp = {'id': corr_id}
-
-        try:
-            result = FUNCTIONS[func_name](*args, **kwargs)
-            resp.update(status='ok', result=result)
-        except Exception as e:
-            resp.update(status='error', error=str(e))
-
-        # send back over the client’s reply queue
-        r.rpush(reply_queue, json.dumps(resp))
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
