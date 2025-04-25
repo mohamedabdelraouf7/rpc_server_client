@@ -1,29 +1,49 @@
 #!/usr/bin/env python3
-import os, json, redis, uuid
+import os, json, redis, time
 
-REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
-REQUEST_CH = "rpc:req"
-RESPONSE_CH = "rpc:res:"
+REDIS_HOST   = os.getenv("REDIS_HOST", "127.0.0.1")
+REQ_QUEUE    = "rpc_queue"          # incoming requests
+REPLY_PREFIX = "rpc_response_"      # per-call reply queue
 
-def add(a, b):     
+# ---- RPC methods -----------------------------------------------------------
+def add(a: int, b: int) -> int:
+    """Simple demo RPC that adds two numbers."""
     return a + b
 
-def main():
-    r = redis.Redis(host=REDIS_HOST, decode_responses=True)
-    sub = r.pubsub()
-    sub.subscribe(REQUEST_CH)
-    print(f"[SERVER] Waiting for calls on {REQUEST_CH} …")
-    for msg in sub.listen():
-        if msg["type"] != "message":
-            continue
-        req = json.loads(msg["data"])
-        call_id = req["id"]
-        method  = req["method"]
-        params  = req.get("params", [])
-        print(f"[SERVER] {method}{tuple(params)}")
-        # simple function dispatcher
-        result = globals()[method](*params)
-        r.publish(RESPONSE_CH + call_id, json.dumps({"result": result}))
+FUNC_MAP = {
+    "add": add,
+    # "sub": sub, "mul": mul ...  # extend here
+}
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+    print(f"[SERVER] Awaiting RPC requests on list '{REQ_QUEUE}' (Redis {REDIS_HOST})")
+
+    while True:
+        # BLPOP returns (queue_name, payload) or blocks indefinitely
+        _, msg = r.blpop(REQ_QUEUE)
+        req = json.loads(msg)
+
+        method = req.get("method")
+        params = req.get("params", [])
+        corr_id = req.get("correlation_id")
+        reply_queue = req.get("reply_queue")
+
+        print(f"[SERVER] {method}{tuple(params)}  (corr_id={corr_id})")
+
+        if method not in FUNC_MAP:
+            result = {"error": f"unknown method '{method}'", "correlation_id": corr_id}
+        else:
+            try:
+                result = {"result": FUNC_MAP[method](*params), "correlation_id": corr_id}
+            except Exception as e:
+                result = {"error": str(e), "correlation_id": corr_id}
+
+        r.rpush(reply_queue, json.dumps(result))
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[SERVER] Shutting down.")
