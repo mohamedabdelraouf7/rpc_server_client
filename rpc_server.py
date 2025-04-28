@@ -1,49 +1,33 @@
-#!/usr/bin/env python3
-import os, json, redis, time
+import redis
+import json
 
-REDIS_HOST   = os.getenv("REDIS_HOST", "192.168.1.22")
-REQ_QUEUE    = "rpc_queue"          # incoming requests
-REPLY_PREFIX = "rpc_response_"      # per-call reply queue
+def main():
+    r = redis.Redis(host='192.168.1.9', port=6379, decode_responses=True)
 
-# ---- RPC methods -----------------------------------------------------------
-def add(a: int, b: int) -> int:
-    """Simple demo RPC that adds two numbers."""
-    return a + b
-
-FUNC_MAP = {
-    "add": add,
-    # "sub": sub, "mul": mul ...  # extend here
-}
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
-    print(f"[SERVER] Awaiting RPC requests on list '{REQ_QUEUE}' (Redis {REDIS_HOST})")
+    print("[Server] Waiting for requests...")
 
     while True:
-        # BLPOP returns (queue_name, payload) or blocks indefinitely
-        _, msg = r.blpop(REQ_QUEUE)
-        req = json.loads(msg)
+        request = r.brpop('rpc:queue', timeout=0)
+        if request:
+            _, message = request
+            request_data = json.loads(message)
 
-        method = req.get("method")
-        params = req.get("params", [])
-        corr_id = req.get("correlation_id")
-        reply_queue = req.get("reply_queue")
+            request_id = request_data['id']
+            method = request_data['method']
+            params = request_data['params']
 
-        print(f"[SERVER] {method}{tuple(params)}  (corr_id={corr_id})")
+            print(f"[Server] Received request: {method}({params})")
 
-        if method not in FUNC_MAP:
-            result = {"error": f"unknown method '{method}'", "correlation_id": corr_id}
-        else:
-            try:
-                result = {"result": FUNC_MAP[method](*params), "correlation_id": corr_id}
-            except Exception as e:
-                result = {"error": str(e), "correlation_id": corr_id}
+            if method == 'square':
+                result = params * params
+            else:
+                result = None
 
-        r.rpush(reply_queue, json.dumps(result))
+            response = {
+                'result': result
+            }
+            response_queue = f"rpc:response:{request_id}"
+            r.lpush(response_queue, json.dumps(response))
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n[SERVER] Shutting down.")
+    main()
